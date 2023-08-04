@@ -3,9 +3,10 @@ package db
 import (
 	"errors"
 	"fmt"
-	"gorm.io/gorm"
 	"math"
 	"strings"
+
+	"gorm.io/gorm"
 )
 
 type Pagination struct {
@@ -45,6 +46,11 @@ func prepareQuery(db *gorm.DB, paging *Paging) *gorm.DB {
 		defPage  = 1
 		defLimit = 20
 	)
+
+	// change for raw query
+	if db.Statement.SQL.String() != "" {
+		db = db.Table("(?) as inner_table", db)
+	}
 
 	// if not defined
 	if paging == nil {
@@ -145,6 +151,16 @@ func Pages(p *Param, result interface{}) (paginator *Pagination, err error) {
 }
 
 func getCounts(db *gorm.DB, anyType interface{}, done chan bool, count *int64) {
+	// check if the db has raw sql
+	// if yes, then use the raw sql to count
+	// else use the gorm.Model(anyType).Count(count) to count
+	if db.Statement.SQL.String() != "" {
+		subQuery := fmt.Sprintf("SELECT count(*) FROM (%s) AS count_query", db.Statement.SQL.String())
+		db.Raw(subQuery).Scan(count)
+		fmt.Printf("count: %d\n", *count)
+		done <- true
+		return
+	}
 	db.Model(anyType).Count(count)
 	done <- true
 }

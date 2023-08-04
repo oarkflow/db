@@ -2,7 +2,7 @@ module github.com/oarkflow/db
 
 go 1.20
 
-require gorm.io/gorm v1.24.7-0.20230306060331-85eaf9eeda11
+require gorm.io/gorm v1.25.2
 
 require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
