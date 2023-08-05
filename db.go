@@ -25,6 +25,7 @@ type Paging struct {
 	SearchBy       string   `json:"search_by" query:"search_by" form:"search_by"`
 	Limit          int      `json:"limit" query:"limit" form:"limit"`
 	Page           int      `json:"page" query:"page" form:"page"`
+	Raw            bool     `json:"raw" query:"raw" form:"raw"`
 	offset         int
 	ShowSQL        bool
 }
@@ -37,6 +38,8 @@ type PaginatedResponse struct {
 
 type Param struct {
 	DB     *gorm.DB
+	Query  string
+	Param  map[string]any
 	Paging *Paging
 }
 
@@ -101,6 +104,44 @@ func prepareQuery(db *gorm.DB, paging *Paging) *gorm.DB {
 	return db.Limit(paging.Limit).Offset(paging.offset)
 }
 
+func prepareRawQuery(db *gorm.DB, query string, paging *Paging, param ...map[string]any) *gorm.DB {
+	var (
+		defPage  = 1
+		defLimit = 20
+	)
+
+	// if not defined
+	if paging == nil {
+		paging = &Paging{}
+	}
+
+	// debug sql
+	if paging.ShowSQL {
+		db = db.Debug()
+	}
+	// limit
+	if paging.Limit == 0 {
+		paging.Limit = defLimit
+	}
+	// page
+	if paging.Page < 1 {
+		paging.Page = defPage
+	} else if paging.Page > 1 {
+		paging.offset = (paging.Page - 1) * paging.Limit
+	}
+	queryWithoutLimit := strings.Split(query, "LIMIT")[0]
+	switch db.Dialector.Name() {
+	case "postgres":
+		queryWithoutLimit += fmt.Sprintf(" LIMIT %d OFFSET %d", paging.Limit, paging.offset)
+	case "mysql", "mariadb":
+		queryWithoutLimit += fmt.Sprintf(" LIMIT %d, %d", paging.Limit, paging.offset)
+	}
+	if len(param) > 0 && len(param[0]) > 0 {
+		return db.Raw(queryWithoutLimit, param[0])
+	}
+	return db.Raw(queryWithoutLimit)
+}
+
 // Pages Endpoint for pagination
 func Pages(p *Param, result interface{}) (paginator *Pagination, err error) {
 	var (
@@ -108,12 +149,19 @@ func Pages(p *Param, result interface{}) (paginator *Pagination, err error) {
 		db    = p.DB.Session(&gorm.Session{})
 		count int64
 	)
-	// get all counts
-	go getCounts(db, result, done, &count)
 
-	db = prepareQuery(db, p.Paging)
+	if p.Query != "" {
+		// get all counts
+		go getRawCounts(db, p.Query, done, &count, p.Param)
+		db = prepareRawQuery(db, p.Query, p.Paging, p.Param)
+	} else {
+		// get all counts
+		go getCounts(db, result, done, &count)
+		db = prepareQuery(db, p.Paging)
+	}
 	// get
 	if errGet := db.Find(result).Error; errGet != nil && !errors.Is(errGet, gorm.ErrRecordNotFound) {
+		panic(errGet)
 		return nil, errGet
 	}
 	<-done
@@ -149,6 +197,16 @@ func getCounts(db *gorm.DB, anyType interface{}, done chan bool, count *int64) {
 	done <- true
 }
 
+func getRawCounts(db *gorm.DB, query string, done chan bool, count *int64, params ...map[string]any) {
+	if len(params) > 0 && len(params[0]) > 0 {
+		db.Raw(fmt.Sprintf("SELECT count(*) FROM (%s) AS count_query", query), params[0]).Count(count)
+		done <- true
+		return
+	}
+	db.Raw(fmt.Sprintf("SELECT count(*) FROM (%s) AS count_query", query)).Count(count)
+	done <- true
+}
+
 func (p Pagination) IsEmpty() bool {
 	return p.TotalRecords <= 0
 }
@@ -158,6 +216,27 @@ func Paginate(query *gorm.DB, result interface{}, paging Paging) PaginatedRespon
 		DB:     query,
 		Paging: &paging,
 	}, result)
+	if err != nil {
+		return PaginatedResponse{
+			Error: err,
+		}
+	}
+	return PaginatedResponse{
+		Items:      result,
+		Pagination: pages,
+	}
+}
+
+func PaginateRaw(db *gorm.DB, query string, result interface{}, paging Paging, params ...map[string]any) PaginatedResponse {
+	p := &Param{
+		DB:     db,
+		Query:  query,
+		Paging: &paging,
+	}
+	if len(params) > 0 {
+		p.Param = params[0]
+	}
+	pages, err := Pages(p, result)
 	if err != nil {
 		return PaginatedResponse{
 			Error: err,
